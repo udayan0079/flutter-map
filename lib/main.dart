@@ -46,10 +46,9 @@ class RealTimeLocationTrackerScreen extends StatefulWidget {
 class _RealTimeLocationTrackerScreenState
     extends State<RealTimeLocationTrackerScreen> {
   GoogleMapController? _mapController;
-  Timer? _liveGpsTimer;
-  Timer? _simulationTimer;
+  Timer? _locationTimer;
 
-  // Default initial position (Mayor Mohammad Hanif Flyover / Gulistan entry)
+  // Default initial position (Mayor Mohammad Hanif Flyover / Gulistan entry matching Dhaka area)
   static const LatLng _initialPosition = LatLng(23.722621, 90.415511);
 
   LatLng? _currentPosition;
@@ -58,13 +57,12 @@ class _RealTimeLocationTrackerScreenState
   final List<LatLng> _polylineCoordinates = [];
 
   bool _isInfoWindowOpen = true;
-  bool _isSimulating = true; // Enabled by default for easy demo/testing on emulators
-  bool _isSimulationPaused = false;
+  bool _isSimulating = false; // Default: Live GPS mode as required by assignment
   int _simulationIndex = 0;
 
   // 131 high-precision road coordinates along Mayor Mohammad Hanif Flyover / Jatrabari Road
-  // Every single waypoint strictly lies on the road asphalt with ~25m realistic spacing
-  static const List<LatLng> _roadWaypoints = [
+  // Every single waypoint strictly lies on the real road asphalt without cutting through buildings
+  static const List<LatLng> _demoRoadWaypoints = [
     LatLng(23.722621, 90.415511),
     LatLng(23.722522, 90.415722),
     LatLng(23.722437, 90.415899),
@@ -201,70 +199,44 @@ class _RealTimeLocationTrackerScreenState
   @override
   void initState() {
     super.initState();
-    // Start tracking immediately upon load
-    _startTrackingSession();
+    _startLocationTracking();
   }
 
   @override
   void dispose() {
-    _liveGpsTimer?.cancel();
-    _simulationTimer?.cancel();
+    _locationTimer?.cancel();
     _mapController?.dispose();
     super.dispose();
   }
 
-  void _startTrackingSession() {
+  /// Starts the tracking timer.
+  /// When Live GPS: updates every 10 seconds (as per Task 2).
+  /// When Simulating: moves every 2 seconds smoothly along the road.
+  void _startLocationTracking() {
+    _locationTimer?.cancel();
+
     if (_isSimulating) {
-      _startRoadSimulation();
-    } else {
-      _startLiveGpsTracking();
-    }
-  }
-
-  /// Starts realistic road simulation advancing along actual road waypoints every 1.5 seconds
-  void _startRoadSimulation() {
-    _liveGpsTimer?.cancel();
-    _simulationTimer?.cancel();
-
-    // Place marker at initial road waypoint if not already started
-    if (_simulationIndex >= _roadWaypoints.length) {
       _simulationIndex = 0;
-    }
-    final startPt = _roadWaypoints[_simulationIndex];
-    _applyNewLocation(
-      newPosition: startPt,
-      latitude: startPt.latitude,
-      longitude: startPt.longitude,
-      isInitial: _polylineCoordinates.isEmpty,
-    );
-
-    // Realistic navigation step interval: advances every 1.5s (~60 km/h)
-    _simulationTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) {
-      if (_isSimulationPaused) return;
-
-      _simulationIndex = (_simulationIndex + 1) % _roadWaypoints.length;
-      final nextPt = _roadWaypoints[_simulationIndex];
+      final startPt = _demoRoadWaypoints[0];
       _applyNewLocation(
-        newPosition: nextPt,
-        latitude: nextPt.latitude,
-        longitude: nextPt.longitude,
+        newPosition: startPt,
+        latitude: startPt.latitude,
+        longitude: startPt.longitude,
+        isInitial: true,
       );
-    });
-  }
 
-  /// Task 2: Real-Time Location Updates
-  /// Fetches the user's current GPS location immediately and then every 10 seconds.
-  void _startLiveGpsTracking() {
-    _simulationTimer?.cancel();
-    _liveGpsTimer?.cancel();
+      _locationTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+        _simulateMovementStep();
+      });
+    } else {
+      // 1. Fetch initial live location immediately
+      _fetchAndUpdateLocation(isInitial: true);
 
-    // Fetch initial live location immediately
-    _fetchAndUpdateLocation(isInitial: true);
-
-    // Periodic GPS fetch every 10 seconds as required by assignment specification
-    _liveGpsTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
-      _fetchAndUpdateLocation();
-    });
+      // 2. Task 2: Fetch location periodically every 10 seconds
+      _locationTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+        _fetchAndUpdateLocation();
+      });
+    }
   }
 
   /// Checks and requests location permissions and services.
@@ -357,7 +329,7 @@ class _RealTimeLocationTrackerScreenState
       _currentPosition = newPosition;
 
       // Task 3: Polyline Tracking
-      // Adds new coordinate along the route, connecting past points to current point
+      // Keep updating the polyline connecting previous and current locations
       if (_polylineCoordinates.isEmpty) {
         _polylineCoordinates.add(newPosition);
       } else {
@@ -367,7 +339,7 @@ class _RealTimeLocationTrackerScreenState
           newPosition.latitude,
           newPosition.longitude,
         );
-        // Only add if movement is at least 1.0 meter (filters tiny jitter while keeping road fidelity)
+        // Add if moved at least 1.0 meter (filters stillness noise while preserving road bends)
         if (distance >= 1.0) {
           _polylineCoordinates.add(newPosition);
         }
@@ -382,7 +354,7 @@ class _RealTimeLocationTrackerScreenState
           position: newPosition,
           infoWindow: InfoWindow(
             title: 'My Current Location',
-            snippet: '${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}',
+            snippet: '$latitude,$longitude',
           ),
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
           onTap: () {
@@ -401,14 +373,14 @@ class _RealTimeLocationTrackerScreenState
       isInitial: isInitial || _polylineCoordinates.length <= 1,
     );
 
-    // Keep InfoWindow open as requested in the assignment demo
+    // Keep InfoWindow open if opened
     if (_isInfoWindowOpen && _mapController != null) {
       _mapController!.showMarkerInfoWindow(const MarkerId('current_location'));
     }
   }
 
   /// Updates the Polyline set with the current coordinate list.
-  /// Polyline strictly connects the road points with rounded joints and caps
+  /// Strictly follows the road path with rounded caps and joints.
   void _updatePolylineSet() {
     _polylines.clear();
     if (_polylineCoordinates.length >= 2) {
@@ -416,7 +388,7 @@ class _RealTimeLocationTrackerScreenState
         Polyline(
           polylineId: const PolylineId('tracking_polyline'),
           points: List<LatLng>.from(_polylineCoordinates),
-          color: const Color(0xFF1E88E5), // Clean vibrant navigation blue
+          color: const Color(0xFF2196F3),
           width: 6,
           jointType: JointType.round,
           startCap: Cap.roundCap,
@@ -446,13 +418,13 @@ class _RealTimeLocationTrackerScreenState
     }
   }
 
+  /// Called when the Google Map is successfully created.
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
 
     final target = _currentPosition ?? _initialPosition;
     _animateCamera(target, isInitial: true);
 
-    // Automatically display InfoWindow upon creation
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted && _mapController != null && _isInfoWindowOpen) {
         _mapController!.showMarkerInfoWindow(const MarkerId('current_location'));
@@ -460,47 +432,14 @@ class _RealTimeLocationTrackerScreenState
     });
   }
 
-  void _toggleSimulation() {
-    setState(() {
-      _isSimulating = !_isSimulating;
-      _polylineCoordinates.clear();
-      _polylines.clear();
-      _simulationIndex = 0;
-      _isSimulationPaused = false;
-    });
-
-    if (_isSimulating) {
-      _startRoadSimulation();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Road Simulation: Moving smoothly along real road waypoints'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    } else {
-      _startLiveGpsTracking();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Switched to Live GPS Tracking (Updates every 10s)'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
-  }
-
-  void _resetPolylineHistory() {
-    setState(() {
-      _polylineCoordinates.clear();
-      if (_currentPosition != null) {
-        _polylineCoordinates.add(_currentPosition!);
-      }
-      _updatePolylineSet();
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Polyline history cleared.'),
-        duration: Duration(seconds: 1),
-      ),
+  /// Simulates a movement step along actual road coordinates.
+  void _simulateMovementStep() {
+    _simulationIndex = (_simulationIndex + 1) % _demoRoadWaypoints.length;
+    final nextPoint = _demoRoadWaypoints[_simulationIndex];
+    _applyNewLocation(
+      newPosition: nextPoint,
+      latitude: nextPoint.latitude,
+      longitude: nextPoint.longitude,
     );
   }
 
@@ -515,7 +454,24 @@ class _RealTimeLocationTrackerScreenState
             tooltip: 'Options',
             onSelected: (value) {
               if (value == 'toggle_simulation') {
-                _toggleSimulation();
+                setState(() {
+                  _isSimulating = !_isSimulating;
+                  _polylineCoordinates.clear();
+                  _polylines.clear();
+                  _simulationIndex = 0;
+                });
+                _startLocationTracking();
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      _isSimulating
+                          ? 'Simulation enabled: Moving smoothly along real road'
+                          : 'Live GPS tracking enabled (every 10s)',
+                    ),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
               } else if (value == 'recenter') {
                 if (_currentPosition != null) {
                   _animateCamera(_currentPosition!, isInitial: true);
@@ -526,7 +482,19 @@ class _RealTimeLocationTrackerScreenState
                   const MarkerId('current_location'),
                 );
               } else if (value == 'clear_polyline') {
-                _resetPolylineHistory();
+                setState(() {
+                  _polylineCoordinates.clear();
+                  if (_currentPosition != null) {
+                    _polylineCoordinates.add(_currentPosition!);
+                  }
+                  _updatePolylineSet();
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Polyline path reset.'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
               }
             },
             itemBuilder: (context) => [
@@ -535,14 +503,14 @@ class _RealTimeLocationTrackerScreenState
                 child: Row(
                   children: [
                     Icon(
-                      _isSimulating ? Icons.gps_fixed : Icons.directions_car,
+                      _isSimulating ? Icons.gps_fixed : Icons.directions_walk,
                       color: Colors.blue,
                     ),
                     const SizedBox(width: 8),
                     Text(
                       _isSimulating
                           ? 'Switch to Live GPS'
-                          : 'Simulate Road Movement',
+                          : 'Simulate Movement (Demo)',
                     ),
                   ],
                 ),
@@ -581,150 +549,19 @@ class _RealTimeLocationTrackerScreenState
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          // Google Map with padding so default controls do not collide with bottom control card
-          GoogleMap(
-            padding: const EdgeInsets.only(bottom: 110),
-            initialCameraPosition: const CameraPosition(
-              target: _initialPosition,
-              zoom: 16.0,
-            ),
-            onMapCreated: _onMapCreated,
-            markers: _markers,
-            polylines: _polylines,
-            myLocationEnabled: true,
-            myLocationButtonEnabled: true,
-            zoomControlsEnabled: true,
-            compassEnabled: true,
-            mapToolbarEnabled: true,
-          ),
-
-          // Bottom Control Card for quick and easy evaluation
-          Positioned(
-            left: 12,
-            right: 12,
-            bottom: 16,
-            child: Card(
-              elevation: 8,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Mode and Coordinate display row
-                    Row(
-                      children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _isSimulating
-                                ? (_isSimulationPaused ? Colors.orange : Colors.green)
-                                : Colors.blue,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _isSimulating
-                              ? (_isSimulationPaused
-                                  ? 'Road Simulation (Paused)'
-                                  : 'Road Simulation (${_simulationIndex + 1}/${_roadWaypoints.length})')
-                              : 'Live GPS (Every 10s)',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const Spacer(),
-                        if (_currentPosition != null)
-                          Text(
-                            '${_currentPosition!.latitude.toStringAsFixed(4)}, ${_currentPosition!.longitude.toStringAsFixed(4)}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade700,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                      ],
-                    ),
-                    const Divider(height: 12),
-                    // Quick Action Buttons
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        // Play / Pause (Simulation only)
-                        if (_isSimulating)
-                          TextButton.icon(
-                            style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(horizontal: 8),
-                            ),
-                            icon: Icon(
-                              _isSimulationPaused ? Icons.play_arrow : Icons.pause,
-                              size: 18,
-                              color: Colors.blue,
-                            ),
-                            label: Text(
-                              _isSimulationPaused ? 'Resume' : 'Pause',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            onPressed: () {
-                              setState(() {
-                                _isSimulationPaused = !_isSimulationPaused;
-                              });
-                            },
-                          ),
-
-                        // Switch Mode (Simulation <-> Live GPS)
-                        TextButton.icon(
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          icon: Icon(
-                            _isSimulating ? Icons.gps_fixed : Icons.directions_car,
-                            size: 18,
-                            color: Colors.indigo,
-                          ),
-                          label: Text(
-                            _isSimulating ? 'Use Live GPS' : 'Simulate Road',
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          onPressed: _toggleSimulation,
-                        ),
-
-                        // Reset Polyline
-                        TextButton.icon(
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          icon: const Icon(
-                            Icons.refresh,
-                            size: 18,
-                            color: Colors.deepOrange,
-                          ),
-                          label: const Text(
-                            'Reset',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                          onPressed: () {
-                            setState(() {
-                              _simulationIndex = 0;
-                            });
-                            _resetPolylineHistory();
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
+      body: GoogleMap(
+        initialCameraPosition: const CameraPosition(
+          target: _initialPosition,
+          zoom: 16.0,
+        ),
+        onMapCreated: _onMapCreated,
+        markers: _markers,
+        polylines: _polylines,
+        myLocationEnabled: true,
+        myLocationButtonEnabled: true,
+        zoomControlsEnabled: true,
+        compassEnabled: true,
+        mapToolbarEnabled: true,
       ),
     );
   }
